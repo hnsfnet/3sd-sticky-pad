@@ -18,6 +18,8 @@ MIN_WIDTH = 150
 MIN_HEIGHT = 120
 DEFAULT_WIDTH = 220
 DEFAULT_HEIGHT = 220
+HEADER_HEIGHT = 28
+AUTO_SAVE_INTERVAL = 30000
 TEXT_FG = "#212121"
 PIN_FG = "#C62828"
 FONT_FAMILY = "Microsoft YaHei"
@@ -52,21 +54,24 @@ class StickyNote:
         self.root.attributes("-topmost", self.pinned)
         self.root.configure(bg=COLORS[self.color_key]["border"])
         self.root.resizable(False, False)
+        self._user_resized = False
 
-        sw = self.root.winfo_screenwidth()
-        sh = self.root.winfo_screenheight()
-        if x is None:
-            x = (sw - self.width) // 3
-        if y is None:
-            y = (sh - self.height) // 3
-        x = max(0, min(x, sw - self.width))
-        y = max(0, min(y, sh - self.height))
+        if x is None or y is None:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            if x is None:
+                x = (sw - self.width) // 3
+            if y is None:
+                y = (sh - self.height) // 3
+            x = max(0, min(x, sw - self.width))
+            y = max(0, min(y, sh - self.height))
         self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
 
         self._build_ui()
         self._apply_pin_visual()
         self._restore_bold()
         self._bind_events()
+        self.root.after(50, self._auto_resize_height)
 
     def _c(self, key):
         return COLORS[self.color_key][key]
@@ -156,8 +161,10 @@ class StickyNote:
         self.resize_handle.bind("<Button-1>", self._start_resize)
         self.resize_handle.bind("<B1-Motion>", self._on_resize)
 
-        self.text.bind("<KeyRelease>", lambda e: self.app.schedule_save())
+        self.text.bind("<KeyRelease>", self._on_text_change)
         self.root.bind("<Configure>", lambda e: self.app.schedule_save())
+        self.root.bind("<FocusOut>", self._on_focus_out)
+        self.text.bind("<FocusOut>", self._on_focus_out)
 
         self.text.bind("<Control-s>", self._manual_save)
         self.text.bind("<Control-S>", self._manual_save)
@@ -180,11 +187,51 @@ class StickyNote:
         self._resize_h = self.root.winfo_height()
 
     def _on_resize(self, event):
+        self._user_resized = True
         dw = event.x_root - self._resize_x
         dh = event.y_root - self._resize_y
         new_w = max(MIN_WIDTH, self._resize_w + dw)
         new_h = max(MIN_HEIGHT, self._resize_h + dh)
         self.root.geometry(f"{new_w}x{new_h}")
+
+    def _on_text_change(self, event=None):
+        self.app.schedule_save()
+        self._auto_resize_height()
+
+    def _on_focus_out(self, event=None):
+        self.root.after(100, self._check_focus_and_save)
+
+    def _check_focus_and_save(self):
+        try:
+            focused = self.root.focus_get()
+            root_path = str(self.root)
+            if focused is None or not str(focused).startswith(root_path):
+                self.app.save_notes()
+        except tk.TclError:
+            pass
+
+    def _auto_resize_height(self):
+        if self._user_resized:
+            return
+        try:
+            line_count = int(self.text.index("end-1c").split(".")[0])
+            char_height = self.text.metrics("linespace")
+            pad_top = int(self.text.cget("pady"))
+            pad_bottom = pad_top
+            border = 4
+            text_height = line_count * char_height + pad_top + pad_bottom + border
+            total_height = HEADER_HEIGHT + text_height + 24
+            current_h = self.root.winfo_height()
+            min_h = max(MIN_HEIGHT, self.height)
+            new_h = max(min_h, total_height)
+            if new_h != current_h:
+                current_g = self.root.geometry()
+                size_part = current_g.split("+")[0]
+                pos_part = "+" + "+".join(current_g.split("+")[1:])
+                w = int(size_part.split("x")[0])
+                self.root.geometry(f"{w}x{new_h}{pos_part}")
+        except (tk.TclError, ValueError, AttributeError):
+            pass
 
     def _manual_save(self, event=None):
         self.app.save_notes()
@@ -397,6 +444,7 @@ class NoteApp:
         self.control = ControlPanel(self)
         self.load_notes()
         self.root.after(300, self._start_tray)
+        self.root.after(500, self._auto_save_loop)
         self._register_hotkeys()
 
     def _register_hotkeys(self):
@@ -513,6 +561,13 @@ class NoteApp:
         if self._save_timer:
             self.root.after_cancel(self._save_timer)
         self._save_timer = self.root.after(500, self.save_notes)
+
+    def _auto_save_loop(self):
+        try:
+            self.save_notes()
+        except Exception:
+            pass
+        self.root.after(AUTO_SAVE_INTERVAL, self._auto_save_loop)
 
     def save_notes(self):
         data = [note.to_dict() for note in self.notes.values()]
