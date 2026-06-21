@@ -2,6 +2,7 @@ import json
 import os
 
 import config
+from note_model import Note
 
 
 class NoteStore:
@@ -13,15 +14,21 @@ class NoteStore:
             return []
         try:
             with open(self.file_path, "r", encoding="utf-8") as f:
-                data = json.load(f)
+                raw_data = json.load(f)
         except (IOError, json.JSONDecodeError) as e:
             print(f"加载失败: {e}")
             return []
-        if not isinstance(data, list):
+        if not isinstance(raw_data, list):
             return []
-        return data
+        notes = []
+        for item in raw_data:
+            if not isinstance(item, dict):
+                continue
+            notes.append(Note.from_dict(item))
+        return notes
 
-    def save(self, data):
+    def save(self, notes):
+        data = [n.to_dict() if isinstance(n, Note) else n for n in notes]
         try:
             with open(self.file_path, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)

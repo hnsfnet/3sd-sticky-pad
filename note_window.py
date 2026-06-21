@@ -1,42 +1,35 @@
-import uuid
 import tkinter as tk
 from tkinter import scrolledtext, simpledialog
 
 import config
+from note_model import Note
 
 
 class StickyNote:
-    def __init__(self, manager, note_id=None, x=None, y=None,
-                 width=config.DEFAULT_WIDTH, height=config.DEFAULT_HEIGHT,
-                 content="", color=None, tag="", pinned=False, bold_ranges=None):
+    def __init__(self, manager, note):
         self.manager = manager
-        self.note_id = note_id or str(uuid.uuid4())
-        self.content = content
-        self.width = max(width, config.MIN_WIDTH)
-        self.height = max(height, config.MIN_HEIGHT)
-        self.color_key = color if color in config.COLORS else config.DEFAULT_COLOR
-        self.tag = tag or ""
-        self.pinned = bool(pinned)
-        self.bold_ranges = bold_ranges or []
+        self.data = note
         self._saved_flash = None
         self._user_resized = False
 
         self.root = tk.Toplevel(manager.root)
         self.root.overrideredirect(True)
-        self.root.attributes("-topmost", self.pinned)
+        self.root.attributes("-topmost", self.data.pinned)
         self.root.configure(bg=self._c("border"))
         self.root.resizable(False, False)
 
+        x, y = self.data.x, self.data.y
         if x is None or y is None:
             sw = self.root.winfo_screenwidth()
             sh = self.root.winfo_screenheight()
             if x is None:
-                x = (sw - self.width) // 3
+                x = (sw - self.data.width) // 3
             if y is None:
-                y = (sh - self.height) // 3
-            x = max(0, min(x, sw - self.width))
-            y = max(0, min(y, sh - self.height))
-        self.root.geometry(f"{self.width}x{self.height}+{x}+{y}")
+                y = (sh - self.data.height) // 3
+            x = max(0, min(x, sw - self.data.width))
+            y = max(0, min(y, sh - self.data.height))
+            self.data.x, self.data.y = x, y
+        self.root.geometry(f"{self.data.width}x{self.data.height}+{x}+{y}")
 
         self._build_ui()
         self._apply_pin_visual()
@@ -44,8 +37,20 @@ class StickyNote:
         self._bind_events()
         self.root.after(50, self._auto_resize_height)
 
+    @property
+    def note_id(self):
+        return self.data.id
+
+    @property
+    def tag(self):
+        return self.data.tag
+
+    @property
+    def pinned(self):
+        return self.data.pinned
+
     def _c(self, key):
-        return config.COLORS[self.color_key][key]
+        return config.COLORS[self.data.color][key]
 
     def _build_ui(self):
         border = self._c("border")
@@ -85,7 +90,7 @@ class StickyNote:
         )
         self.text.pack(fill="both", expand=True)
         self.text.tag_configure("bold", font=(config.FONT_FAMILY, config.FONT_SIZE, "bold"))
-        self.text.insert("1.0", self.content)
+        self.text.insert("1.0", self.data.content)
 
         self.resize_handle = tk.Label(
             self.root, text="⇲", bg=self._c("bg"), fg="#9E9E9E",
@@ -94,10 +99,10 @@ class StickyNote:
         self.resize_handle.place(relx=1.0, rely=1.0, anchor="se", x=-2, y=-2)
 
     def _refresh_tag_label(self):
-        self.tag_label.config(text=f"#{self.tag}" if self.tag else "")
+        self.tag_label.config(text=f"#{self.data.tag}" if self.data.tag else "")
 
     def _apply_pin_visual(self):
-        if self.pinned:
+        if self.data.pinned:
             self.root.configure(bg=config.PIN_FG)
             self.header.configure(bg=config.PIN_FG)
             self.title_label.config(text="📌 便签", fg=config.PIN_FG, bg=self._c("header"))
@@ -106,12 +111,12 @@ class StickyNote:
             self.header.configure(bg=self._c("border"))
             self.title_label.config(text="便签", fg=config.TEXT_FG, bg=self._c("header"))
         try:
-            self.root.attributes("-topmost", self.pinned)
+            self.root.attributes("-topmost", self.data.pinned)
         except tk.TclError:
             pass
 
     def _restore_bold(self):
-        for s, e in self.bold_ranges:
+        for s, e in self.data.bold_ranges:
             try:
                 self.text.tag_add("bold", s, e)
             except tk.TclError:
@@ -130,7 +135,7 @@ class StickyNote:
         self.resize_handle.bind("<B1-Motion>", self._on_resize)
 
         self.text.bind("<KeyRelease>", self._on_text_change)
-        self.root.bind("<Configure>", lambda e: self.manager.schedule_save())
+        self.root.bind("<Configure>", lambda e: self._sync_geometry())
         self.root.bind("<FocusOut>", self._on_focus_out)
         self.text.bind("<FocusOut>", self._on_focus_out)
 
@@ -162,7 +167,28 @@ class StickyNote:
         new_h = max(config.MIN_HEIGHT, self._resize_h + dh)
         self.root.geometry(f"{new_w}x{new_h}")
 
+    def _sync_geometry(self):
+        try:
+            g = self.root.geometry()
+            size, pos = g.split("+", 1)
+            w, h = map(int, size.split("x"))
+            x, y = map(int, pos.split("+"))
+            self.data.x, self.data.y = x, y
+            self.data.width, self.data.height = w, h
+        except (ValueError, tk.TclError):
+            pass
+        self.manager.schedule_save()
+
+    def _sync_content(self):
+        try:
+            self.data.content = self.text.get("1.0", "end-1c")
+            self.data.bold_ranges = self._get_bold_ranges()
+        except tk.TclError:
+            pass
+
     def _on_text_change(self, event=None):
+        self._sync_content()
+        self.data.touch()
         self.manager.schedule_save()
         self._auto_resize_height()
 
@@ -174,6 +200,7 @@ class StickyNote:
             focused = self.root.focus_get()
             root_path = str(self.root)
             if focused is None or not str(focused).startswith(root_path):
+                self._sync_content()
                 self.manager.save_now()
         except tk.TclError:
             pass
@@ -189,7 +216,7 @@ class StickyNote:
             text_height = line_count * char_height + pad_top * 2 + border
             total_height = config.HEADER_HEIGHT + text_height + 24
             current_h = self.root.winfo_height()
-            min_h = max(config.MIN_HEIGHT, self.height)
+            min_h = max(config.MIN_HEIGHT, self.data.height)
             new_h = max(min_h, total_height)
             if new_h != current_h:
                 current_g = self.root.geometry()
@@ -201,6 +228,8 @@ class StickyNote:
             pass
 
     def _manual_save(self, event=None):
+        self._sync_content()
+        self.data.touch()
         self.manager.save_now()
         self._flash_saved()
         return "break"
@@ -225,13 +254,15 @@ class StickyNote:
                     self.text.tag_add("bold", "sel.first", "sel.last")
         except tk.TclError:
             pass
+        self._sync_content()
+        self.data.touch()
         self.manager.schedule_save()
         return "break"
 
     def _show_context_menu(self, event):
         menu = tk.Menu(self.root, tearoff=0, font=(config.FONT_FAMILY, config.HEADER_FONT_SIZE))
         menu.add_checkbutton(label="置顶", command=self.toggle_pin,
-                             variable=tk.BooleanVar(value=self.pinned))
+                             variable=tk.BooleanVar(value=self.data.pinned))
         menu.add_command(label="设置标签...", command=self._set_tag_dialog)
         color_menu = tk.Menu(menu, tearoff=0, font=(config.FONT_FAMILY, config.HEADER_FONT_SIZE))
         for key in config.COLORS:
@@ -248,23 +279,26 @@ class StickyNote:
             menu.grab_release()
 
     def toggle_pin(self):
-        self.pinned = not self.pinned
+        self.data.pinned = not self.data.pinned
+        self.data.touch()
         self._apply_pin_visual()
         self.manager.schedule_save()
 
     def _set_tag_dialog(self):
         new_tag = simpledialog.askstring(
-            "设置标签", "输入标签名称（留空清除）：", initialvalue=self.tag, parent=self.manager.root
+            "设置标签", "输入标签名称（留空清除）：", initialvalue=self.data.tag, parent=self.manager.root
         )
         if new_tag is not None:
-            self.tag = new_tag.strip()
+            self.data.tag = new_tag.strip()
+            self.data.touch()
             self._refresh_tag_label()
             self.manager.schedule_save()
 
     def set_color(self, color_key):
         if color_key not in config.COLORS:
             return
-        self.color_key = color_key
+        self.data.color = color_key
+        self.data.touch()
         bg = self._c("bg")
         header_bg = self._c("header")
         self.text.config(bg=bg)
@@ -281,7 +315,7 @@ class StickyNote:
             self.root.destroy()
         except tk.TclError:
             pass
-        self.manager.remove_note(self.note_id)
+        self.manager.remove_note(self.data.id)
 
     def show(self):
         try:
@@ -309,23 +343,17 @@ class StickyNote:
         return ranges
 
     def to_dict(self):
+        self._sync_content()
+        self._sync_geometry_safe()
+        return self.data.to_dict()
+
+    def _sync_geometry_safe(self):
         try:
             g = self.root.geometry()
             size, pos = g.split("+", 1)
             w, h = map(int, size.split("x"))
             x, y = map(int, pos.split("+"))
-        except Exception:
-            w, h, x, y = self.width, self.height, 100, 100
-        try:
-            content = self.text.get("1.0", "end-1c")
-        except tk.TclError:
-            content = self.content
-        return {
-            "id": self.note_id,
-            "x": x, "y": y, "width": w, "height": h,
-            "content": content,
-            "color": self.color_key,
-            "tag": self.tag,
-            "pinned": self.pinned,
-            "bold_ranges": self._get_bold_ranges()
-        }
+            self.data.x, self.data.y = x, y
+            self.data.width, self.data.height = w, h
+        except (ValueError, tk.TclError):
+            pass
